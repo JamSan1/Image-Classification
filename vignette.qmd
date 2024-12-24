@@ -1,0 +1,406 @@
+---
+title: "vignette-images"
+author: "David Pan, James San, Peter Xiong, Amy Ji"
+format: html
+editor: visual
+---
+
+# Image Classification with CNN
+
+Convolutional Neural Networks (CNNs) are deep learning models that extract features from images using convolutional layers, followed by pooling and fully connected layers for tasks like image classification. They excel in capturing spatial hierarchies and patterns, making them ideal for analyzing visual data.
+
+There are three types of CNN architecture which are the convolutional layers, pooling layers, and fully-connected (FC) layers. When these layers are stacked, a CNN architecture will be formed. In addition to these three layers, there is a more important parameter which is the activation function.
+
+
+## Data
+
+Worldwide 300,000 people are diagnosed with brain tumors annually with nearly one-third of these cases being cancerous. These characteristics immediately make brain tumors a pressing issue, however brain tumors are very diverse thus would require extensive scans to diagnose specific brain tumor types. This is where image classification comes in, specifically we will be applying a convolutional neural network model. A CNN model strengths lie in it's ability to identify patterns in images and extract features from data which is great for identifying specific brain tumors. In our case, we will be dealing with the three most common types, glioma, meningioma, and pituitary tumors as well as no tumor cases. The data set we will be using contains 7023 MRI images all classified in one of the four classes. With the use of artificial intelligence it could lead to faster detections, personalized treatments, and improved planning.
+
+```{r}
+# packages
+library(tidyverse)
+library(tensorflow)
+library(keras3)
+
+tensorflow::set_random_seed(197)
+
+# the data has already been partitioned
+batch_size <- 32
+img_height <- 256
+img_width <- 256
+
+train_tumor <- image_dataset_from_directory(
+  directory = 'data/Training',
+  image_size = c(img_height, img_width),
+  batch_size = batch_size,
+  seed = 197
+)
+
+test_tumor <- image_dataset_from_directory(
+  directory = 'data/Testing',
+  image_size = c(img_height, img_width),
+  batch_size = batch_size,
+  seed = 197
+)
+```
+
+## Visualize Data
+
+Examine a batch of 32 images.
+
+```{r}
+batch <- train_tumor %>% as_iterator() %>% iter_next()
+
+str(batch)
+```
+
+The first tensor contains image data. In this batch, there are 32 images that are 256 pixels high and 256 pixels wide. Each pixel is represented as a 3-element vector containing the RGB value associated with the pixel.
+
+The second tensor includes the labels for each image.
+
+```{r}
+images <- batch[[1]]
+labels <- batch[[2]]
+
+display_image <- function(x, max = 255, margins = c(0,0,0,0)) {
+  x %>%
+    as.array() %>%
+    drop() %>%
+    as.raster(max = max) %>%
+    plot(interpolate = FALSE)
+}
+
+par(mfrow = c(4,8), mar = c(1,1,1,1))
+for (i in 1:32){
+  display_image(images[i,,,])
+}
+```
+
+### Data Preprocessing
+
+We utilized a code (the specific code is in the script section of the repository with the name Preprocessing.R) which performs automated preprocessing and resizing of images stored in a nested directory structure using the “EBImage” and “fs” packages in R. The preprocess_image function processes a single image by converting it to grayscale, applying Gaussian blur, thresholding it to create a binary mask, and performing morphological operations (erosion and dilation) to reduce noise.
+
+It then identifies the largest connected component in the binary image, calculates its bounding box, crops the image to this region, and resizes it to the specified dimensions (default: 256x256 pixels). The resize_images_in_directory function applies this preprocessing to all images within a specified input directory, recursively traversing through subdirectories. For each subdirectory, it mirrors the structure in a specified output directory, processes all images within, and saves the resized images to the corresponding subdirectory in the output directory. This would make batch preprocessing large datasets of image really convenient since the directory structure is maintained.
+
+### What is glioma?
+
+Glioma is a type of brain tumor that originates from glial cells in the spinal cord and brain, it is the most common cancerous brain tumor and makes up one-third of all brain tumors.
+
+```{r}
+display_image(images[1,,,])
+```
+
+### What is meningioma?
+
+A type of brain tumor that grows in the membrane that cover the brain and spinal cord, it is the most common tumor type in the head but are usually non-cancerous, 10-15% are cancerous.
+
+```{r}
+display_image(images[13,,,])
+```
+
+### What is a pituitary tumor?
+
+The pituitary is a small gland found at the base of the brain, directly in line with the top of your nose. They account for 10-15% of all brain tumors and most are non-cancerous, causing no symptoms. Rarely is it cancerous, less than 0.1%.
+
+```{r}
+display_image(images[32,,,])
+```
+
+### Non-Tumor
+
+The data set also contains images of non-tumor brains.
+
+```{r}
+display_image(images[30,,,])
+```
+
+## Single Layer Model
+
+First we test out the most basic neural network, which includes just a single layer. Since the data is a 3 dimensional matrix of numbers, we need to flatten it into a single dimension before feeding it into the model to make predictions.
+
+### Define model architecture
+
+```{r}
+model_single_layer <- keras_model_sequential(input_shape = c(img_height, img_width, 3)) %>%
+  layer_rescaling(1./255) %>%
+  layer_flatten() %>%
+  layer_dense(4) %>%
+  layer_activation(activation = 'softmax')
+
+summary(model_single_layer)
+```
+
+### Compile model
+
+The adam optimizer is good for general use neural network training, so it should work for our model. The crossentropy loss function is typically used for classification problems, and the neural network's objective is to minimize the value of this function. The optimizer will use the loss function's gradient to try to find the lowest point. Finally, we use accuracy to judge the effectiveness of the model, which is simply the number of correct predictions divided by the number of total predictions.
+
+```{r}
+model_single_layer %>% compile(
+  optimizer = 'adam',
+  loss = 'crossentropy',
+  metrics = 'accuracy'
+)
+```
+
+### Train model
+
+```{r}
+history_single_layer <- model_single_layer %>%
+  fit(train_tumor, epochs = 20)
+```
+
+### Test model
+
+```{r}
+evaluate(model_single_layer, test_tumor)
+```
+
+This accuracy is not bad for a single layer model, but there is a lot of room for improvement. The testing accuracy is lower than our training accuracy, which is a sign that the model is overfitting the training data.
+
+## Data Augmentation
+
+Data augmentation is a technique often used to reduce overfitting. It involves making alterations to the training data, such as random rotations and flipping, to generate new training data and make the model more robust to unseen data. Here, we will augment the data using changes to brightness and contrast of the training images.
+
+```{r}
+# create data augmentation layer
+data_augmentation <- keras_model_sequential(input_shape = c(256, 256, 3)) %>%
+  layer_random_brightness(factor = 0.1) %>%
+  layer_random_contrast(factor = 0.15)
+
+# visualizae changes
+par(mfrow = c(3,3), mar = c(1,1,1,1))
+for (i in 1:9){
+  images[1,,,, drop = FALSE] %>%
+    data_augmentation() %>%
+    display_image()
+}
+```
+
+### Update single layer model
+
+```{r}
+model_aug <- keras_model_sequential(input_shape = c(img_height, img_width, 3)) %>%
+  layer_random_brightness(factor = 0.1) %>%
+  layer_random_contrast(factor = 0.15) %>%
+  layer_rescaling(1./255) %>%
+  layer_flatten() %>%
+  layer_dense(4) %>%
+  layer_activation(activation = 'softmax')
+
+summary(model_aug)
+```
+
+### Compile model
+
+```{r}
+model_aug %>% compile(
+  optimizer = 'adam',
+  loss = 'crossentropy',
+  metrics = 'accuracy'
+)
+```
+
+### Train model
+
+```{r}
+history_aug <- model_aug %>%
+  fit(train_tumor, epochs = 20)
+```
+
+### Test model
+
+```{r}
+evaluate(model_aug, test_tumor)
+```
+
+Data augmentation provides a slight boost in testing accuracy due to reduced overfitting, which allows the model to better generalize to new, unseen data.
+
+## Multi Layer CNN Model
+
+We used a simplified version of the VGG-16 model architecture.
+
+```{r}
+model_vgg16 <- keras_model_sequential(input_shape = c(256, 256, 3)) %>%
+  # Preprocessing layers
+  layer_random_brightness(factor = 0.1) %>%
+  layer_random_contrast(factor = 0.15) %>%
+  layer_rescaling(1./255) %>%
+  
+  # Convolutional layers
+  layer_conv_2d(filters = 8, kernel_size = c(3,3), activation = 'relu', padding = 'same') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = c(2,2)) %>%
+  
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), activation = 'relu', padding = 'same') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = c(2,2)) %>%
+  
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', padding = 'same') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = c(2,2)) %>%
+  
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu', padding = 'same') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = c(2,2)) %>%
+  
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu', padding = 'same') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides = c(2,2)) %>%
+  
+  # Fully connected layers
+  layer_flatten() %>%
+  layer_dense(units = 4096, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 4, activation = 'softmax')
+
+summary(model_vgg16)
+```
+
+Here is a brief explanation of what the different types of layers do:
+
+Convolutional layers are the core building blocks of a Convolutional Neural Network (CNN). They are responsible for detecting patterns or features in input data, such as edges, textures, shapes, or more abstract details, depending on the layer's depth. They take in an input image or feature map (e.g., a 256×256×3 image with height, width, and color channels for RGB). Then the kernel, a small matrix (3×3 in this case) slides over the input, performing an operation called a convolution. Each kernel is designed to detect specific features in the image. The convolution operation produces a feature map, showing where certain features are detected in the input. If the input is an image and the filter detects edges, the feature map highlights the edges.
+
+Pooling layers are used to reduce the spatial dimensions (height and width) of feature maps while retaining their most important information. This makes the model more computationally efficient and helps prevent overfitting. Pooling divides the input feature map into non-overlapping or overlapping regions and reduces each region to a single value.
+
+The dropout layer randomly assigns inputs to 0, which reduces overfitting and allows the model to generalize to new data.
+
+Fully connected layers are used in the final stages of a CNN to perform classification or regression tasks. In these layers, every neuron is connected to every neuron in the previous layer. Each neuron in a fully connected layer receives inputs from all neurons of the previous layer, with each connection having a specific weight and each neuron incorporating a bias. The input to each neuron is a weighted sum of these inputs plus a bias. The weighted sum is then processed through a non-linear activation function, such as ReLU, Sigmoid, or Tanh. This step introduces non-linearity, enabling the network to learn complex functions.
+
+### Compile model
+
+```{r}
+model_vgg16 %>% compile(loss = 'crossentropy',
+                  optimizer = 'adam',
+                  metrics = 'accuracy')
+```
+
+### Train model
+
+```{r}
+history_vgg16 <- model_vgg16 %>%
+  fit(train_tumor, epochs = 10)
+```
+
+### Test model
+
+```{r}
+evaluate(model_vgg16, test_tumor)
+```
+
+This model is able to converge to a higher accuracy in a fewer amount of epochs, and the testing accuracy is improved drastically. 
+
+## ResNet Model
+
+Simplified version of the ResNet Model.
+
+Type of CNN model that introduces residual learning to deal with the issue of vanishing and exploding gradients that other models face in very deep networks.
+
+The ResNet model utilizes skip connections, also known as residual connections, which bypasses one or more layers and directly connects the input back with the output of the main path which undergoes the normal sequence through all the convolutional blocks. This way the residuals from the input are preserved and can flow through the network while remaining significant.
+
+We first introduce the residual block which defines the structure of each block in the network, we have the shortcut which is essentially the input. The if statement deals with dimensional errors that occur after down sampling, the main path and shortcut paths may not align dimensionally so we apply a 1x1 convolution to the shortcut dimensions. Afterwards we create our convolution blocks and normalization and non-linearity layers. At the end we combine the shortcut, input, with the main path output to create a final output.
+
+```{r}
+residual_block <- function(input, filters, strides = c(1, 1)) {
+
+  shortcut <- input
+  
+  if (input$shape[[3]] != filters || !all(strides == c(1, 1))) {
+    shortcut <- layer_conv_2d(
+      filters = filters,
+      kernel_size = c(1, 1),
+      strides = strides,
+      padding = "same",
+      activation = NULL
+    )(input)
+    shortcut <- layer_batch_normalization()(shortcut)
+  }
+  
+  # First convolution
+  x <- layer_conv_2d(
+    filters = filters,
+    kernel_size = c(3, 3),
+    strides = strides,
+    padding = "same",
+    activation = NULL
+  )(input)
+  x <- layer_batch_normalization()(x)
+  x <- layer_activation_relu()(x)
+  
+  # Second convolution
+  x <- layer_conv_2d(
+    filters = filters,
+    kernel_size = c(3, 3),
+    strides = c(1, 1),
+    padding = "same",
+    activation = NULL
+  )(x)
+  x <- layer_batch_normalization()(x)
+  
+  # Add shortcut and output
+  x <- layer_add(list(shortcut, x))
+  x <- layer_activation_relu()(x)
+  
+  return(x)
+}
+
+# Define the ResNet Model
+input_layer <- layer_input(shape = c(img_height, img_width, 3))
+
+# Initial Convolution and Pooling
+x <- layer_conv_2d(filters = 8, kernel_size = c(7, 7), strides = c(2, 2), padding = "same")(input_layer)
+x <- layer_batch_normalization()(x)
+x <- layer_activation_relu()(x)
+x <- layer_max_pooling_2d(pool_size = c(3, 3), strides = c(2, 2), padding = "same")(x)
+
+# Residual Blocks
+x <- residual_block(x, filters = 8)
+x <- residual_block(x, filters = 8)
+x <- residual_block(x, filters = 16, strides = c(2, 2))  # Downsample
+x <- residual_block(x, filters = 16)
+x <- residual_block(x, filters = 32, strides = c(2, 2))  # Downsample
+x <- residual_block(x, filters = 32)
+x <- residual_block(x, filters = 64, strides = c(2, 2))  # Downsample
+x <- residual_block(x, filters = 64)
+
+
+# Fully Connected Layers
+x <- layer_global_average_pooling_2d()(x)
+output_layer <- layer_dense(units = 4, activation = "softmax")(x)
+```
+
+Once we have the residual blocks created we define the model, apply a initial convolution and down sample. This way we take the input and begin with a larger filter, 7x7, which is able to capture larger shapes and patterns and allowing us to start with a larger receptive field to get the broader features early on, our normal filter size would be 3x3. The down sampling reduces the spatial dimensions of the feature map to increase field of view that layers process. As a result, higher level features are emphasized while the lower-level ones are essentially phased out. Afterwards we call our residual blocks that we had defined above, 8 in total, we increase the filter number every time we down sample to compensate for the decreased spatial dimensions and also the deeper layers have more filters to get more abstract features which is critical for that stage.
+
+We have a total of 61 layers.
+
+## Compile ResNet Model
+
+```{r}
+# Compile the Model
+resnet61_model <- keras_model(inputs = input_layer, outputs = output_layer)
+
+# Print Model Summary
+summary(resnet61_model)
+
+# Compile the model
+resnet61_model %>% compile(
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  loss = "sparse_categorical_crossentropy", 
+  metrics = c("accuracy")
+)
+```
+
+## Train ResNet Model
+
+```{r}
+# Train the model
+history <- resnet61_model %>% fit(
+  train_tumor,  # Replace with your training dataset
+  epochs = 10
+)
+```
+
+## Test ResNet Model
+
+```{r}
+evaluate(resnet61_model, test_tumor)
+```
+
+## Conclusion
+
+Overall, the Vgg16 Multi-layer model performed the best for our brain tumor image classification. It was expected result as the res-net model shines in very deep networks since it is able to generalize better while that is where the vgg struggles, in our case we had not applied very deep networks due to the computational cost. Furthermore, the Vgg model is great with smaller data sets which is what we used to test these models and on the other end of the spectrum, the res-net model is great for large-scale, complex tasks. In the end, our model performances really depended on our data and application.
+
